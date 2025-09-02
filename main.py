@@ -104,23 +104,55 @@ WELCOME_TEXT = (
     "Выберите действие 👇"
 )
 
-INSIDE_TEXT = (
-    "<b>Что внутри сообщества TubeComy</b>\n\n"
-    "• Практические материалы по росту YouTube-каналов\n"
-    "• Контент-стратегии, упаковка и продакшн\n"
-    "• Идеи и рабочие подходы к монетизации\n"
-    "• Обновления и поддержка участников\n\n"
-    f"Подписка: {PRICE_RUB} ₽ / {PERIOD_DAYS} дней"
-)
-
 @dp.message(CommandStart())
 async def on_start(m: Message):
     await m.answer(WELCOME_TEXT, reply_markup=main_menu())
 
 @dp.callback_query(F.data == "what_inside")
 async def on_inside(cb: CallbackQuery):
-    await cb.message.answer(INSIDE_TEXT, reply_markup=main_menu())
-    await cb.answer()
+    try:
+        if INSIDE_POST_ID <= 0:
+            await cb.message.answer(
+                "Пост пока не привязан. Напишите в поддержку.",
+                reply_markup=main_menu()
+            )
+            await cb.answer()
+            return
+
+        if INSIDE_CHANNEL:
+            # публичный канал: копируем пост по @username
+            await bot.copy_message(
+                chat_id=cb.message.chat.id,
+                from_chat_id=INSIDE_CHANNEL,
+                message_id=INSIDE_POST_ID
+            )
+        elif INSIDE_CHANNEL_ID:
+            # вариант для приватного канала по числовому id (на будущее)
+            await bot.copy_message(
+                chat_id=cb.message.chat.id,
+                from_chat_id=int(INSIDE_CHANNEL_ID),
+                message_id=INSIDE_POST_ID
+            )
+        else:
+            await cb.message.answer(
+                "Не задан источник поста. Напишите в поддержку.",
+                reply_markup=main_menu()
+            )
+            await cb.answer()
+            return
+
+        # вернем клавиатуру отдельным сообщением
+        await cb.message.answer("Ещё вопросы? Выберите действие👇", reply_markup=main_menu())
+
+    except Exception as e:
+        # если пост удалён/ID неверный/бота нет в канале — покажем заглушку
+        await cb.message.answer(
+            "Не удалось показать пост (возможно, неверный ID или нет доступа). "
+            "Напишите в поддержку — пришлём пример.",
+            reply_markup=main_menu()
+        )
+    finally:
+        await cb.answer()
 
 @dp.callback_query(F.data == "join")
 async def on_join(cb: CallbackQuery, state: FSMContext):

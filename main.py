@@ -46,11 +46,46 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 app = FastAPI()
+# --- E-MAIL: SQLite (чтобы не спрашивать повторно никогда) ---
+import sqlite3
+from datetime import datetime
+
+DB_PATH = "emails.db"
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS emails (
+                user_id INTEGER PRIMARY KEY,
+                email TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+def get_email_db(user_id: int) -> str | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute("SELECT email FROM emails WHERE user_id=?", (user_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+def save_email_db(user_id: int, email: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO emails (user_id, email, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+              email=excluded.email,
+              updated_at=excluded.updated_at
+            """,
+            (user_id, email, datetime.utcnow().isoformat())
+        )
+
+init_db()
 
 # --- Память ---
 screen_stack: Dict[int, List[str]] = {}
 current_msgs: Dict[int, List[int]] = {}
-user_emails: Dict[int, str] = {}
 
 # --- Утилиты ---
 async def clear_msgs(chat_id: int):
@@ -184,28 +219,39 @@ async def cmd_start(m: Message):
     screen_stack[m.from_user.id] = []
     current_msgs[m.chat.id] = []
     await show_screen(m.chat.id, "main")
-
+    
 @dp.callback_query(F.data == "join")
 async def cb_join(cb: CallbackQuery):
-    if user_emails.get(cb.from_user.id):
-        await show_screen(cb.from_user.id, "join")
+    # читаем e-mail из БД (а не из user_emails)
+    email = get_email_db(cb.from_user.id)
+    if email:
+        await show_screen(cb.from_user.id, "join")   # сразу выбор способа оплаты
     else:
-        await show_screen(cb.from_user.id, "email")
+        await show_screen(cb.from_user.id, "email")  # сначала спросим e-mail (один раз)
     await cb.answer()
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", re.I)
 
 @dp.message()
 async def on_text(m: Message):
+    # обрабатываем ввод e-mail только когда активен экран "email"
     if peek_screen(m.from_user.id) == "email":
         email = (m.text or "").strip()
-        if EMAIL_RE.match(email):
-            user_emails[m.from_user.id] = email
-            await bot.send_message(m.chat.id, "✅ E-mail сохранён.")
-            await show_screen(m.chat.id, "join")
-        else:
-            await bot.send_message(m.chat.id, "❌ Некорректный e-mail. Попробуйте ещё раз.")
 
+        if not EMAIL_RE.match(email):
+            await bot.send_message(m.chat.id, "❌ Некорректный e-mail. Попробуйте ещё раз.")
+            return
+
+        # сохраняем в БД (навсегда)
+        save_email_db(m.from_user.id, email)
+        await bot.send_message(m.chat.id, "✅ E-mail сохранён.")
+
+        # убираем из стека экран "email", чтобы «Назад» потом не вел к нему
+        pop_screen(m.from_user.id)
+
+        # и сразу переходим к выбору оплаты
+        await show_screen(m.chat.id, "join")
+        
 @dp.callback_query(F.data == "pay_card")
 async def cb_card(cb: CallbackQuery):
     await show_screen(cb.from_user.id, "pay_card")
@@ -223,9 +269,17 @@ async def cb_inside(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "back")
 async def cb_back(cb: CallbackQuery):
-    pop_screen(cb.from_user.id)
-    prev = peek_screen(cb.from_user.id) or "main"
-    await show_screen(cb.from_user.id, prev)
+    uid = cb.from_user.id
+
+    # снимаем текущий экран
+    pop_screen(uid)
+
+    # если следующий в стеке "email" — пропускаем его
+    if peek_screen(uid) == "email":
+        pop_screen(uid)
+
+    prev = peek_screen(uid) or "main"
+    await show_screen(uid, prev)
     await cb.answer()
 
 # --- FastAPI webhook ---

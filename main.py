@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -84,7 +86,10 @@ def is_valid_email(s: str) -> bool:
     return bool(EMAIL_RE.match(s.strip()))
 
 # ---------- Бот ----------
-bot = Bot(BOT_TOKEN, parse_mode="HTML")
+bot = Bot(
+    BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
 
 class JoinFlow(StatesGroup):

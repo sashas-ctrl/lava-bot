@@ -224,7 +224,6 @@ async def render_inside(chat_id: int) -> None:
 
     # запомнить сообщение для корректного «Назад»
     current_msgs[chat_id] = [msg.message_id]
-    push_screen(chat_id, "inside")
 
 renderers: Dict[str, Callable[[int], None]] = {
     "main": render_main,

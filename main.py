@@ -21,7 +21,9 @@ PAYMENT_URL = os.getenv("PAYMENT_URL", "https://tubecomy.com/pay")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "sashablogerr")
 
 # ==== aiogram ====
-bot = Bot(BOT_TOKEN, parse_mode="HTML")
+from aiogram.client.default import DefaultBotProperties
+
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 def main_menu() -> InlineKeyboardMarkup:

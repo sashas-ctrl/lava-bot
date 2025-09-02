@@ -125,7 +125,7 @@ async def send_block(chat_id: int, text: str, kb: InlineKeyboardMarkup, img_key:
 # --- Кнопки ---
 def kb_main():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"ВСТУПИТЬ — {TARIFF_PRICE}₽/{TARIFF_DAYS}дн", callback_data="join")],
+        [InlineKeyboardButton(text=f"ВСТУПИТЬ", callback_data="join")],
         [
             InlineKeyboardButton(text="Что внутри?", callback_data="inside"),
             InlineKeyboardButton(text="Задать вопрос", url=f"https://t.me/{SUPPORT_USERNAME}")
@@ -134,8 +134,8 @@ def kb_main():
 
 def kb_join():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Оплата картой РФ", callback_data="pay_card")],
-        [InlineKeyboardButton(text="🪙 Оплата криптой", callback_data="pay_crypto")],
+        [InlineKeyboardButton(text="ОПЛАТА КАРТОЙ РФ", callback_data="pay_card")],
+        [InlineKeyboardButton(text="ОПЛАТА КРИПТОЙ", callback_data="pay_crypto")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
     ])
 
@@ -147,15 +147,15 @@ def kb_pay_card():
 
 def kb_pay_crypto():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Связаться", url=f"https://t.me/{SUPPORT_USERNAME}")],
-        [InlineKeyboardButton(text="Оплатить картой РФ", callback_data="pay_card")],
+        [InlineKeyboardButton(text="СВЯЗАТЬСЯ", url=f"https://t.me/{SUPPORT_USERNAME}")],
+        [InlineKeyboardButton(text="ОПЛАТИТЬ КАРТОЙ РФ", callback_data="pay_card")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
     ])
 
 def kb_inside():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="ВСТУПИТЬ", callback_data="join")],
-        [InlineKeyboardButton(text="Доп. вопросы", url=f"https://t.me/{SUPPORT_USERNAME}")],
+        [InlineKeyboardButton(text="Задать вопросы", url=f"https://t.me/{SUPPORT_USERNAME}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
     ])
 
@@ -192,10 +192,26 @@ async def render_pay_crypto(chat_id: int):
 
 async def render_inside(chat_id: int):
     await clear_msgs(chat_id)
-    # Пересылаем пост
-    if WHAT_INSIDE_URL:
-        await bot.send_message(chat_id, WHAT_INSIDE_URL)
-    text = "А вот и детали нашего сообщества 👇"
+       # Показываем сам пост (без ссылки): копия из канала + записываем message_id
+    try:
+        msg_post = await bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=INSIDE_CHANNEL,   # например: @greycomunity
+            message_id=INSIDE_MSG_ID       # например: 5
+        )
+        current_msgs.setdefault(chat_id, []).append(msg_post.message_id)
+    except Exception:
+        # если не получилось — покажем понятную ошибку (тоже запишем id)
+        msg_err = await bot.send_message(
+            chat_id,
+            "Не удалось показать пост (возможно, неверный ID или нет доступа).\n"
+            "Напишите в поддержку — пришлём пример."
+        )
+        current_msgs.setdefault(chat_id, []).append(msg_err.message_id)
+
+    # Отдельным сообщением показываем кнопки: ВСТУПИТЬ / Задать вопрос / Назад
+    text = ""
+    # send_block — если у тебя эта функция сама пушит экран и пишет сообщение в current_msgs — оставляем как есть:
     await send_block(chat_id, text, kb_inside(), "inside")
 
 renderers: Dict[str, Callable[[int], None]] = {

@@ -6,6 +6,7 @@ from typing import Dict, List, Callable, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Update, Message, CallbackQuery,
@@ -46,7 +47,7 @@ WHAT_INSIDE_TEXT = (
 )
 
 # ============ BOT / DP / APP ============
-bot = Bot(BOT_TOKEN)
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 app = FastAPI()
 
@@ -119,14 +120,17 @@ def pay_crypto_kb() -> InlineKeyboardMarkup:
     ])
 
 def push_screen(chat_id: int, name: str):
-    screen_stack.setdefault(chat_id, [])
-    # не даём возвращаться на e-mail, если он уже сохранён
+    """Кладём экран в стек, но не дублируем подряд одинаковые.
+       Экран email пропускаем, если e-mail уже сохранён."""
+    stack = screen_stack.setdefault(chat_id, [])
     if name == "email" and chat_id in user_emails:
         name = "join"
-    screen_stack[chat_id].append(name)
+    if stack and stack[-1] == name:
+        return
+    stack.append(name)
 
 def pop_screen(chat_id: int) -> str:
-    """Возвращает имя предыдущего экрана. Пусто -> main. Пропускает email, если уже сохранён."""
+    """Достаём предыдущий экран. Пропускаем email, если уже сохранён."""
     stack = screen_stack.setdefault(chat_id, [])
     if stack:
         stack.pop()
@@ -234,8 +238,10 @@ async def cb_pay_crypto(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "back")
 async def cb_back(cb: CallbackQuery):
-    prev_name = pop_screen(cb.from_user.id)
-    await show_screen(cb.from_user.id, prev_name)
+    uid = cb.from_user.id
+    prev = pop_screen(uid)      # получить предыдущий экран
+    await clear_msgs(uid)       # удалить текущий блок сообщений
+    await show_screen(uid, prev)  # показать предыдущий
     await cb.answer()
 
 # ловим e-mail только когда активен экран "email"

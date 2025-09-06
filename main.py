@@ -1,322 +1,87 @@
 import os
-import re
 import logging
-from typing import Dict, List, Callable
+from typing import Dict, Callable, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from aiogram import Bot, Dispatcher, F
-from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import CommandStart
 from aiogram.types import (
-    Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    FSInputFile, Update
+    Update, Message, CallbackQuery,
+    InlineKeyboardButton, InlineKeyboardMarkup
 )
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 
-# --- Логирование ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("tubecomy")
+# ---------- ЛОГИ ----------
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s: %(message)s")
+log = logging.getLogger("tubecomy-bot")
 
-# --- ENV ---
+# ---------- КОНФИГ ----------
 load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PUBLIC_URL = os.getenv("PUBLIC_URL", "")
-SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "sashablogerr")
+PUBLIC_URL = os.getenv("PUBLIC_URL")  # https://lava-bot.onrender.com
+if not BOT_TOKEN or not PUBLIC_URL:
+    raise RuntimeError("ENV BOT_TOKEN и PUBLIC_URL обязательны")
 
-TARIFF_PRICE = int(os.getenv("TARIFF_PRICE", "1499"))
-TARIFF_DAYS = int(os.getenv("TARIFF_DAYS", "30"))
-PAY_CARD_URL = os.getenv("PAY_CARD_URL", "https://yookassa.ru/")
-
-WHAT_INSIDE_URL = os.getenv("WHAT_INSIDE_URL", "")
-
-# Фото (file_id из Telegram)
-IMAGES = {
-    "main": os.getenv("IMAGE_MAIN"),
-    "email": os.getenv("IMAGE_EMAIL"),
-    "join": os.getenv("IMAGE_JOIN"),
-    "pay_card": os.getenv("IMAGE_PAY_CARD"),
-    "pay_crypto": os.getenv("IMAGE_PAY_CRYPTO"),
-    "inside": os.getenv("IMAGE_INSIDE"),
-}
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is required")
-
-# --- Bot/Dispatcher/FastAPI ---
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+# ---------- BOT / DP / APP ----------
+bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
-# --- E-MAIL: SQLite (чтобы не спрашивать повторно никогда) ---
-import sqlite3
-from datetime import datetime
 
-DB_PATH = "emails.db"
+# ---------- ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ----------
+@dp.error()
+async def on_error(event, exception):
+    # логируем что и где упало
+    try:
+        upd_type = event.update.event_type
+    except Exception:
+        upd_type = "unknown"
+    log.exception("Unhandled error (%s): %r", upd_type, exception)
 
-def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS emails (
-                user_id INTEGER PRIMARY KEY,
-                email TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
+    # отвечаем на callback, чтобы телеграм не крутил колёсико бесконечно
+    try:
+        cb = event.update.callback_query
+        if cb:
+            await cb.answer("Произошла ошибка. Попробуйте ещё раз.", show_alert=False)
+    except Exception:
+        pass
 
-def get_email_db(user_id: int) -> str | None:
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.execute("SELECT email FROM emails WHERE user_id=?", (user_id,))
-        row = cur.fetchone()
-        return row[0] if row else None
-
-def save_email_db(user_id: int, email: str) -> None:
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO emails (user_id, email, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-              email=excluded.email,
-              updated_at=excluded.updated_at
-            """,
-            (user_id, email, datetime.utcnow().isoformat())
-        )
-
-init_db()
-
-# --- Память ---
-screen_stack: Dict[int, List[str]] = {}
-current_msgs: Dict[int, List[int]] = {}
-
-# --- Утилиты ---
-async def clear_msgs(chat_id: int):
-    ids = current_msgs.get(chat_id, [])
-    for mid in ids:
-        try:
-            await bot.delete_message(chat_id, mid)
-        except Exception:
-            pass
-    current_msgs[chat_id] = []
-
-def push_screen(uid: int, scr: str):
-    screen_stack.setdefault(uid, []).append(scr)
-
-def pop_screen(uid: int):
-    if screen_stack.get(uid):
-        screen_stack[uid].pop()
-
-def peek_screen(uid: int) -> str | None:
-    return screen_stack.get(uid, [])[-1] if screen_stack.get(uid) else None
-
-async def send_block(chat_id: int, text: str, kb: InlineKeyboardMarkup, img_key: str):
-    msg_ids = []
-    if IMAGES.get(img_key):
-        try:
-            photo = IMAGES[img_key]
-            m = await bot.send_photo(chat_id, photo=photo, caption=text, reply_markup=kb)
-            msg_ids.append(m.message_id)
-        except Exception:
-            m = await bot.send_message(chat_id, text, reply_markup=kb)
-            msg_ids.append(m.message_id)
-    else:
-        m = await bot.send_message(chat_id, text, reply_markup=kb)
-        msg_ids.append(m.message_id)
-    current_msgs.setdefault(chat_id, []).extend(msg_ids)
-
-# --- Кнопки ---
-def kb_main():
+# ---------- УТИЛИТЫ ----------
+def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"ВСТУПИТЬ", callback_data="join")],
-        [
-            InlineKeyboardButton(text="Что внутри?", callback_data="inside"),
-            InlineKeyboardButton(text="Задать вопрос", url=f"https://t.me/{SUPPORT_USERNAME}")
-        ]
+        [InlineKeyboardButton(text="Пинг", callback_data="ping")]
     ])
 
-def kb_join():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ОПЛАТА КАРТОЙ РФ", callback_data="pay_card")],
-        [InlineKeyboardButton(text="ОПЛАТА КРИПТОЙ", callback_data="pay_crypto")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ])
-
-def kb_pay_card():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"1 месяц — {TARIFF_PRICE}₽", url=PAY_CARD_URL)],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ])
-
-def kb_pay_crypto():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="СВЯЗАТЬСЯ", url=f"https://t.me/{SUPPORT_USERNAME}")],
-        [InlineKeyboardButton(text="ОПЛАТИТЬ КАРТОЙ РФ", callback_data="pay_card")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ])
-
-def kb_inside():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ВСТУПИТЬ", callback_data="join")],
-        [InlineKeyboardButton(text="Задать вопросы", url=f"https://t.me/{SUPPORT_USERNAME}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ])
-
-def kb_email():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ])
-
-# --- Экраны ---
-async def render_main(chat_id: int):
-    await clear_msgs(chat_id)
-    text = "<b>TubeComy</b>\n\nЗакрытое сообщество для тех, кто хочет монетизировать контент на YouTube.\nПоддержка, опыт и схемы заработка."
-    await send_block(chat_id, text, kb_main(), "main")
-
-async def render_email(chat_id: int):
-    await clear_msgs(chat_id)
-    text = "✉️ Введите ваш e-mail (например, ivan@example.com). Мы сохраним его один раз для связи и чеков."
-    await send_block(chat_id, text, kb_email(), "email")
-
-async def render_join(chat_id: int):
-    await clear_msgs(chat_id)
-    text = "Выберите способ оплаты:"
-    await send_block(chat_id, text, kb_join(), "join")
-
-async def render_pay_card(chat_id: int):
-    await clear_msgs(chat_id)
-    text = f"Доступ: <b>1 месяц</b> — {TARIFF_PRICE}₽\n\nПосле оплаты доступ активируется автоматически."
-    await send_block(chat_id, text, kb_pay_card(), "pay_card")
-
-async def render_pay_crypto(chat_id: int):
-    await clear_msgs(chat_id)
-    text = "🪙 Оплата криптой.\nНапишите нам — подскажем шаги.\nИли выберите другой способ."
-    await send_block(chat_id, text, kb_pay_crypto(), "pay_crypto")
-
-async def render_inside(chat_id: int):
-    # очищаем всё, что было на экране раньше
-    await clear_msgs(chat_id)
-
-    # --- «что внутри» — один текст, вшитый в код ---
-INSIDE_STATIC_TEXT = (
-    "<b>ЧТО ВАС ЖДЁТ С НАМИ?</b>\n\n"
-    "<u>Уже внутри:</u>\n"
-    "🔍 Классная ниша с низкой конкуренцией — о ней мало кто знает прямо сейчас\n"
-    "📖 Полный гайд — полный разбор ниши, пошаговая инструкция для старта работы, разбор конкурентов\n"
-    "🚀 Методы буста видео — помогут отправить ваши видео в космос\n"
-    "🧭 Методика поиска новых ниш — чтобы всегда знать, куда двигаться дальше\n"
-    "📞 Общий созвон 2 раза в месяц — ответы на вопросы, разборы, инсайды каждый месяц, стабильно\n\n"
-    "<u>Скоро появится:</u>\n"
-    "🛡 Разборы блокировок каналов — и как их обходить\n"
-    "🎯 Новая ниша — также с полным гайдом\n"
-    "🎶 Работа с треками напрямую на себя — без посредников и с большей выгодой (+ бонус)\n"
-    "…"
-)
-async def render_inside(chat_id: int) -> None:
-    # удаляем предыдущее сообщение экрана
-    await clear_msgs(chat_id)
-
-    # одно сообщение: текст + кнопки
-    msg = await bot.send_message(
-        chat_id=chat_id,
-        text=INSIDE_STATIC_TEXT,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=kb_inside(),  # клавиатура: ВСТУПИТЬ / Задать вопрос / Назад
+# ---------- ХЕНДЛЕРЫ ----------
+@dp.message(CommandStart())
+async def on_start(m: Message):
+    await m.answer(
+        "Я жив! Нажми кнопку, чтобы проверить цикл вебхука.",
+        reply_markup=kb_main()
     )
 
-    # запомнить сообщение для корректного «Назад»
-    current_msgs[chat_id] = [msg.message_id]
-
-renderers: Dict[str, Callable[[int], None]] = {
-    "main": render_main,
-    "email": render_email,
-    "join": render_join,
-    "pay_card": render_pay_card,
-    "pay_crypto": render_pay_crypto,
-    "inside": render_inside,
-}
-
-async def show_screen(uid: int, screen: str):
-    push_screen(uid, screen)
-    fn = renderers.get(screen)
-    if fn:
-        await fn(uid)
-
-# --- Handlers ---
-@dp.message(F.text == "/start")
-async def cmd_start(m: Message):
-    screen_stack[m.from_user.id] = []
-    current_msgs[m.chat.id] = []
-    await show_screen(m.chat.id, "main")
-    
-@dp.callback_query(F.data == "join")
-async def cb_join(cb: CallbackQuery):
-    # читаем e-mail из БД (а не из user_emails)
-    email = get_email_db(cb.from_user.id)
-    if email:
-        await show_screen(cb.from_user.id, "join")   # сразу выбор способа оплаты
-    else:
-        await show_screen(cb.from_user.id, "email")  # сначала спросим e-mail (один раз)
+@dp.callback_query(F.data == "ping")
+async def on_ping(cb: CallbackQuery):
+    await cb.message.edit_text("Понг ✅")
     await cb.answer()
 
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", re.I)
+# ---------- FASTAPI: healthz ----------
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
 
-@dp.message()
-async def on_text(m: Message):
-    # обрабатываем ввод e-mail только когда активен экран "email"
-    if peek_screen(m.from_user.id) == "email":
-        email = (m.text or "").strip()
-
-        if not EMAIL_RE.match(email):
-            await bot.send_message(m.chat.id, "❌ Некорректный e-mail. Попробуйте ещё раз.")
-            return
-
-        # сохраняем в БД (навсегда)
-        save_email_db(m.from_user.id, email)
-        await bot.send_message(m.chat.id, "✅ E-mail сохранён.")
-
-        # убираем из стека экран "email", чтобы «Назад» потом не вел к нему
-        pop_screen(m.from_user.id)
-
-        # и сразу переходим к выбору оплаты
-        await show_screen(m.chat.id, "join")
-        
-@dp.callback_query(F.data == "pay_card")
-async def cb_card(cb: CallbackQuery):
-    await show_screen(cb.from_user.id, "pay_card")
-    await cb.answer()
-
-@dp.callback_query(F.data == "pay_crypto")
-async def cb_crypto(cb: CallbackQuery):
-    await show_screen(cb.from_user.id, "pay_crypto")
-    await cb.answer()
-
-@dp.callback_query(F.data == "inside")
-async def cb_inside(cb: CallbackQuery):
-    await show_screen(cb.from_user.id, "inside")
-    await cb.answer()
-
-@dp.callback_query(F.data == "back")
-async def cb_back(cb: CallbackQuery):
-    uid = cb.from_user.id
-
-    # снимаем текущий экран
-    pop_screen(uid)
-
-    # если следующий в стеке "email" — пропускаем его
-    if peek_screen(uid) == "email":
-        pop_screen(uid)
-
-    prev = peek_screen(uid) or "main"
-    await show_screen(uid, prev)
-    await cb.answer()
-
-# --- FastAPI webhook ---
+# ---------- FASTAPI: вебхук ----------
 @app.post("/webhooks/telegram")
-async def tg_webhook(req: Request):
-    data = await req.json()
+async def telegram_webhook(req: Request) -> Response:
+    try:
+        data = await req.json()
+    except Exception:
+        return Response(status_code=400)
     update = Update.model_validate(data)
-    await dp.feed_webhook_update(bot, update)
-    return {"ok": True}
+    await dp.feed_update(bot, update)
+    return Response(status_code=200)
 
-@app.get("/")
-async def root():
-    return {"ok": True}
+# ---------- запуск локально (не используется на Render) ----------
+# если вдруг нужно проверить локально: uvicorn main:app --reload
